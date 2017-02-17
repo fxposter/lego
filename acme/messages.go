@@ -56,6 +56,11 @@ type authorization struct {
 	Combinations [][]int     `json:"combinations,omitempty"`
 }
 
+type authorizationStatusChange struct {
+	Resource string `json:"resource,omitempty"`
+	Status   string `json:"status,omitempty"`
+}
+
 type identifier struct {
 	Type  string `json:"type"`
 	Value string `json:"value"`

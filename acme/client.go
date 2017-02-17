@@ -295,7 +295,7 @@ func (c *Client) AgreeToTOS() error {
 // your issued certificate as a bundle.
 // This function will never return a partial certificate. If one domain in the list fails,
 // the whole certificate will fail.
-func (c *Client) ObtainCertificateForCSR(csr x509.CertificateRequest, bundle bool) (CertificateResource, map[string]error) {
+func (c *Client) ObtainCertificateForCSR(csr x509.CertificateRequest, bundle bool) (CertificateResource, []string, map[string]error) {
 	// figure out what domains it concerns
 	// start with the common name
 	domains := []string{csr.Subject.CommonName}
@@ -320,16 +320,16 @@ DNSNames:
 		logf("[INFO][%s] acme: Obtaining SAN certificate given a CSR", strings.Join(domains, ", "))
 	}
 
-	challenges, failures := c.getChallenges(domains)
+	challenges, authURLs, failures := c.getChallenges(domains)
 	// If any challenge fails - return. Do not generate partial SAN certificates.
 	if len(failures) > 0 {
-		return CertificateResource{}, failures
+		return CertificateResource{}, authURLs, failures
 	}
 
 	errs := c.solveChallenges(challenges)
 	// If any challenge fails - return. Do not generate partial SAN certificates.
 	if len(errs) > 0 {
-		return CertificateResource{}, errs
+		return CertificateResource{}, authURLs, errs
 	}
 
 	logf("[INFO][%s] acme: Validations succeeded; requesting certificates", strings.Join(domains, ", "))
@@ -344,7 +344,7 @@ DNSNames:
 	// Add the CSR to the certificate so that it can be used for renewals.
 	cert.CSR = pemEncode(&csr)
 
-	return cert, failures
+	return cert, authURLs, failures
 }
 
 // ObtainCertificate tries to obtain a single certificate using all domains passed into it.
@@ -356,23 +356,23 @@ DNSNames:
 // your issued certificate as a bundle.
 // This function will never return a partial certificate. If one domain in the list fails,
 // the whole certificate will fail.
-func (c *Client) ObtainCertificate(domains []string, bundle bool, privKey crypto.PrivateKey, mustStaple bool) (CertificateResource, map[string]error) {
+func (c *Client) ObtainCertificate(domains []string, bundle bool, privKey crypto.PrivateKey, mustStaple bool) (CertificateResource, []string, map[string]error) {
 	if bundle {
 		logf("[INFO][%s] acme: Obtaining bundled SAN certificate", strings.Join(domains, ", "))
 	} else {
 		logf("[INFO][%s] acme: Obtaining SAN certificate", strings.Join(domains, ", "))
 	}
 
-	challenges, failures := c.getChallenges(domains)
+	challenges, authURLs, failures := c.getChallenges(domains)
 	// If any challenge fails - return. Do not generate partial SAN certificates.
 	if len(failures) > 0 {
-		return CertificateResource{}, failures
+		return CertificateResource{}, authURLs, failures
 	}
 
 	errs := c.solveChallenges(challenges)
 	// If any challenge fails - return. Do not generate partial SAN certificates.
 	if len(errs) > 0 {
-		return CertificateResource{}, errs
+		return CertificateResource{}, authURLs, errs
 	}
 
 	logf("[INFO][%s] acme: Validations succeeded; requesting certificates", strings.Join(domains, ", "))
@@ -384,7 +384,7 @@ func (c *Client) ObtainCertificate(domains []string, bundle bool, privKey crypto
 		}
 	}
 
-	return cert, failures
+	return cert, authURLs, failures
 }
 
 // RevokeCertificate takes a PEM encoded certificate or bundle and tries to revoke it at the CA.
@@ -413,17 +413,17 @@ func (c *Client) RevokeCertificate(certificate []byte) error {
 // If bundle is true, the []byte contains both the issuer certificate and
 // your issued certificate as a bundle.
 // For private key reuse the PrivateKey property of the passed in CertificateResource should be non-nil.
-func (c *Client) RenewCertificate(cert CertificateResource, bundle, mustStaple bool) (CertificateResource, error) {
+func (c *Client) RenewCertificate(cert CertificateResource, bundle, mustStaple bool) (CertificateResource, []string, error) {
 	// Input certificate is PEM encoded. Decode it here as we may need the decoded
 	// cert later on in the renewal process. The input may be a bundle or a single certificate.
 	certificates, err := parsePEMBundle(cert.Certificate)
 	if err != nil {
-		return CertificateResource{}, err
+		return CertificateResource{}, []string{}, err
 	}
 
 	x509Cert := certificates[0]
 	if x509Cert.IsCA {
-		return CertificateResource{}, fmt.Errorf("[%s] Certificate bundle starts with a CA certificate", cert.Domain)
+		return CertificateResource{}, []string{}, fmt.Errorf("[%s] Certificate bundle starts with a CA certificate", cert.Domain)
 	}
 
 	// This is just meant to be informal for the user.
@@ -436,17 +436,17 @@ func (c *Client) RenewCertificate(cert CertificateResource, bundle, mustStaple b
 	if len(cert.CSR) > 0 {
 		csr, err := pemDecodeTox509CSR(cert.CSR)
 		if err != nil {
-			return CertificateResource{}, err
+			return CertificateResource{}, []string{}, err
 		}
-		newCert, failures := c.ObtainCertificateForCSR(*csr, bundle)
-		return newCert, failures[cert.Domain]
+		newCert, authURLs, failures := c.ObtainCertificateForCSR(*csr, bundle)
+		return newCert, authURLs, failures[cert.Domain]
 	}
 
 	var privKey crypto.PrivateKey
 	if cert.PrivateKey != nil {
 		privKey, err = parsePEMPrivateKey(cert.PrivateKey)
 		if err != nil {
-			return CertificateResource{}, err
+			return CertificateResource{}, []string{}, err
 		}
 	}
 
@@ -465,8 +465,23 @@ func (c *Client) RenewCertificate(cert CertificateResource, bundle, mustStaple b
 		domains = append(domains, x509Cert.Subject.CommonName)
 	}
 
-	newCert, failures := c.ObtainCertificate(domains, bundle, privKey, mustStaple)
-	return newCert, failures[cert.Domain]
+	newCert, authURLs, failures := c.ObtainCertificate(domains, bundle, privKey, mustStaple)
+	return newCert, authURLs, failures[cert.Domain]
+}
+
+func (c *Client) DeactivatePendingAuthorization(authURL string) error {
+	var authz authorization
+	_, err := getJSON(authURL, &authz)
+	if err != nil {
+		return err
+	}
+	if authz.Status == "pending" {
+		_, err := postJSON(c.jws, authURL, authorizationStatusChange{Resource: "authz", Status: "deactivated"}, &authz)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Looks through the challenge combinations to find a solvable match.
@@ -519,7 +534,7 @@ func (c *Client) chooseSolvers(auth authorization, domain string) map[int]solver
 }
 
 // Get the challenges needed to proof our identifier to the ACME server.
-func (c *Client) getChallenges(domains []string) ([]authorizationResource, map[string]error) {
+func (c *Client) getChallenges(domains []string) ([]authorizationResource, []string, map[string]error) {
 	resc, errc := make(chan authorizationResource), make(chan domainError)
 
 	for _, domain := range domains {
@@ -561,18 +576,12 @@ func (c *Client) getChallenges(domains []string) ([]authorizationResource, map[s
 		}
 	}
 
-	logAuthz(challenges)
+	logAuthURLs(challenges)
 
 	close(resc)
 	close(errc)
 
-	return challenges, failures
-}
-
-func logAuthz(authz []authorizationResource) {
-	for _, auth := range authz {
-		logf("[INFO][%s] AuthURL: %s", auth.Domain, auth.AuthURL)
-	}
+	return challenges, extractAuthURLs(challenges), failures
 }
 
 func (c *Client) requestCertificate(authz []authorizationResource, bundle bool, privKey crypto.PrivateKey, mustStaple bool) (CertificateResource, error) {
@@ -607,10 +616,7 @@ func (c *Client) requestCertificate(authz []authorizationResource, bundle bool, 
 func (c *Client) requestCertificateForCsr(authz []authorizationResource, bundle bool, csr []byte, privateKeyPem []byte) (CertificateResource, error) {
 	commonName := authz[0]
 
-	var authURLs []string
-	for _, auth := range authz[1:] {
-		authURLs = append(authURLs, auth.AuthURL)
-	}
+	authURLs := extractAuthURLs(authz[1:])
 
 	csrString := base64.URLEncoding.EncodeToString(csr)
 	jsonBytes, err := json.Marshal(csrMessage{Resource: "new-cert", Csr: csrString, Authorizations: authURLs})
@@ -793,5 +799,19 @@ func validate(j *jws, domain, uri string, chlng challenge) error {
 		if err != nil {
 			return err
 		}
+	}
+}
+
+func extractAuthURLs(authz []authorizationResource) []string {
+	var authURLs []string
+	for _, auth := range authz {
+		authURLs = append(authURLs, auth.AuthURL)
+	}
+	return authURLs
+}
+
+func logAuthURLs(authz []authorizationResource) {
+	for _, auth := range authz {
+		logf("[INFO][%s] AuthURL: %s", auth.Domain, auth.AuthURL)
 	}
 }
