@@ -26,11 +26,6 @@ var (
 const (
 	// maxBodySize is the maximum size of body that we will read.
 	maxBodySize = 1024 * 1024
-
-	// overallRequestLimit is the overall number of request per second limited on the
-	// “new-reg”, “new-authz” and “new-cert” endpoints. From the documentation the
-	// limitation is 20 requests per second, but using 20 as value doesn't work but 18 do
-	overallRequestLimit = 18
 )
 
 // logf writes a log entry. It uses Logger if not
@@ -539,11 +534,7 @@ func (c *Client) chooseSolvers(auth authorization, domain string) map[int]solver
 func (c *Client) getChallenges(domains []string) ([]authorizationResource, map[string]error) {
 	resc, errc := make(chan authorizationResource), make(chan domainError)
 
-	delay := time.Second / overallRequestLimit
-
 	for _, domain := range domains {
-		time.Sleep(delay)
-
 		go func(domain string) {
 			authMsg := authorization{Resource: "new-authz", Identifier: identifier{Type: "dns", Value: domain}}
 			var authz authorization
